@@ -1,5 +1,6 @@
 pyf3d/*
 mnt/*
+pyem/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

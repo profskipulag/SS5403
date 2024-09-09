@@ -1,13 +1,13 @@
-# ST540203 train.py
+# ST540103 emulate.py
 A package for generating emulators, or fast forward models. These are functions that adequately approximate the output of a physics based model such as Fall3D, for a given set of inputs, but perform the calculation at much faster speeds, facilitating their insertion into Monte Carlo Bayesian frameworks. The package consists of `pyem`, a package that contains some helper classes, including
 
  * `Emulator`, a class for creating emulators, currently limited to simple interpolate-and-sum "puff" based emulators that leverage the linear properties of some models, in this case basic Fall3D runs.
 
-The useage of `Emulator` is illustrated in the Jupyter notebook `notebook.ipynb`, and the script `train.py` is the application of the library for the purposes of DTC4. 
+The useage of `Emulator` is illustrated in the Jupyter notebook `notebook.ipynb`, and the script `emulate.py` is the application of the library for the purposes of DTC4. 
 
 ## To do
  * Neural network based emulators for models that are nonlinear in their relationship between flux and ground concentration
- * fill in train.py
+ * fill in emulate.py
  
 ## Package structure
 
@@ -21,7 +21,7 @@ The useage of `Emulator` is illustrated in the Jupyter notebook `notebook.ipynb`
     │   └── source.py         - source code for various classes
     ├── README.md             - this file
     ├── .gitignore            - files to be ignored by git
-    └── train.py              - script that calls the package for DTC4
+    └── emulate.py              - script that calls the package for DTC4
 
 
 ## To download the repository
@@ -43,7 +43,7 @@ Create a new conda environment from the environment.yaml file:
 
 Activate the environment
 
-    conda activate st540203
+    conda activate st540103
     
 Launch the notebook server
 
