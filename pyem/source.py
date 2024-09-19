@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import matplotlib.pyplot as plt
-from pyf3d import YesNo, Fall3DBatch
+from pyf3d import YesNo, Fall3DBatch, Fall3DInputFile
 from scipy.stats import binned_statistic
 
 class Emulator:
@@ -60,7 +60,7 @@ class Emulator:
         df['model_output.output_3d_concentration'] = YesNo('no')
         df['model_output.output_3d_concentration_bins'] = YesNo('no')
         df['model_output.output_surface_concentration'] = YesNo('yes')
-        df['model_output.output_column_load'] = YesNo('no')
+        df['model_output.output_column_load'] = YesNo('yes')
         df['model_output.output_cloud_top'] = YesNo('no')
         df['model_output.output_ground_load'] = YesNo('no')
         df['model_output.output_ground_load_bins'] = YesNo('no')
@@ -100,7 +100,7 @@ class Emulator:
         self.batch.run()
 
     
-    def build_emulator(self):
+    def build_surface_emulator(self):
         
     
         
@@ -235,10 +235,58 @@ class Emulator:
         self.da_puff = da_puff
 
 
-            
-            
     
+    def build_col_mass_emulator(self):
+        
     
+        
+        # we construct the emulator datarray in blocks of source_start
+        # and concatenate them in the last step - this is the list to 
+        # hold them as we build them
+        dss = []
+        
+        
+        # we build the emulator dataarray
+        for source_start, gp in self.df.groupby('source.source_start'):
+        
+            das = []
+        
+            for i, r in gp.iterrows():
+            
+                file ="/".join(["mnt/runs/",self.name, str(i), str(i) + ".res.nc"])
+                
+                ds = xr.open_dataset(file)
+                
+                da = ds['SO2_col_mass']
+            
+                da = da.expand_dims(
+                    dim={
+                        'height_above_vent':np.array([r['source.height_above_vent']]).astype(float)
+                    })
+            
+                das.append(da)
+        
+            ds = xr.concat(das,dim='height_above_vent')
+        
+            #source_start_date = pd.to_datetime(ds_puff["date"].values[0]) + datetime.timedelta(hours = int(source_start))
+            source_start_date = self.start + datetime.timedelta(hours = int(source_start))
+    
+        
+            ds = ds.expand_dims(
+                    dim={
+                        'source_start':[source_start_date]
+                        })
+        
+            dss.append(ds)
+    
+        ds = xr.concat(dss,dim='source_start')
+    
+        ds = ds.sortby('source_start')
+    
+        self.da_col_mass_emulator = ds
+                
+        
+        
     def estimate(self, esps:pd.DataFrame):
     
         # get zero datarray with the correct dims and coords
@@ -402,7 +450,7 @@ class Emulator:
         df_runs['model_output.output_3d_concentration'] = YesNo('no')
         df_runs['model_output.output_3d_concentration_bins'] = YesNo('no')
         df_runs['model_output.output_surface_concentration'] = YesNo('yes')
-        df_runs['model_output.output_column_load'] = YesNo('no')
+        df_runs['model_output.output_column_load'] = YesNo('yes')
         df_runs['model_output.output_cloud_top'] = YesNo('no')
         df_runs['model_output.output_ground_load'] = YesNo('no')
         df_runs['model_output.output_ground_load_bins'] = YesNo('no')
@@ -592,4 +640,83 @@ class Emulator:
             [min(yy), max(yy)],
             color='r'
         )
+    
+    
+    def to_netcdf(self, filename):
+        """Saves emulator as netcdf file
+        """
+        
+    #    ds_batch = self.df.to_xarray()
+    #    das = []
+    #    for name in ds_batch:
+    #        da = ds_batch[name]
+    #        da.name = name.replace(".","___")
+    #        das.append(da.astype(str))
+        
+    #    ds_batch = xr.merge(das)
+        
+        emulator_data = xr.merge([
+            self.da_emulator,
+            self.da_col_mass_emulator,
+            self.da_puff,
+            self.ds_tests         
+        ])
+        
+        emulator_data.attrs = {
+            "base_file":self.basefile.to_string(),
+            'start':str(self.start),
+            'hours':self.hours,
+            'heights' :self.heights,
+            'name' :self.name,
+            'path_fall3d':self.path_fall3d
+        
+        }
+        
+        emulator_data.to_netcdf(filename)
+    
+        return emulator_data
+    
+    
+    @classmethod
+    def from_netcdf(cls, filename):
+        """Loads emulator from netcdf file
+        """
+    
+        ds = xr.open_dataset(filename)
+    
+        basefile_as_string = ds.attrs['base_file']
+        
+        basefile = Fall3DInputFile.from_string(basefile_as_string)
+    
+        start_as_string = ds.attrs['start']
+        
+        start = datetime.datetime.fromisoformat(start_as_string)
+    
+        heights = ds.attrs['heights']
+    
+        hours = ds.attrs['hours']
+    
+        name = ds.attrs['name']
+    
+        path_fall3d = ds.attrs['path_fall3d']
+    
+        emulator = cls(
+            basefile = basefile,
+            start = start,
+            hours = hours,
+            heights = heights,
+            name = name,
+            path_fall3d = path_fall3d
+        )
 
+        emulator.ds_tests = ds[['fall3d surface SO2', 'emulated surface SO2']]
+
+        emulator.da_puff = ds['conc. ground']
+
+        emulator.da_emulator = ds['SO2_con_surface']
+
+        emulator.da_col_mass_emulator = ds['SO2_col_mass']
+
+
+    
+        return(emulator)
