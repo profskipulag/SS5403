@@ -1,6 +1,6 @@
 mnt/*
 pyem/*
-
+dt5404_example.nc
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

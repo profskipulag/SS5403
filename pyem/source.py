@@ -15,10 +15,12 @@ class Emulator:
                  start:datetime.datetime, 
                  hours:int, 
                  heights:np.array,
+                 vertical_turbulence_model: np.array = np.array([0.0]),
                  #stations:xr.Dataset,
                  base_dir:str = 'mnt/runs',
                  name = "emulator_test",
                  path_fall3d = "/home/talfan/Software/Fall3D_local/fall3d/bin/Fall3d.r8.x",
+                 mass_flow_rate = "1000.0"
                 ):
 
         self.basefile = basefile
@@ -34,18 +36,24 @@ class Emulator:
         self.name = name
 
         self.path_fall3d = path_fall3d
+
+        self.mass_flow_rate = mass_flow_rate
+
+        self.vertical_turbulence_model = vertical_turbulence_model
         
         source_starts = range(hours-1)
 
         # outer product
-        source_starts_grid, heights_grid = np.meshgrid(source_starts,heights)
+        source_starts_grid, heights_grid, vertical_turbulence_model_grid = np.meshgrid(source_starts, heights, vertical_turbulence_model)
 
         
 
         df = pd.DataFrame({
                         'source.source_start' : source_starts_grid.flatten(),
-                        'source.height_above_vent' : heights_grid.flatten()
+                        'source.height_above_vent' : heights_grid.flatten(),
+                        'model_physics.vertical_turbulence_model': vertical_turbulence_model_grid.flatten()
                     })
+        
         df['source.source_end'] = df['source.source_start']+1
         #df['source.source_type'] = 'POINT'
 
@@ -79,6 +87,10 @@ class Emulator:
         df['source.source_end'] = df['source.source_end'].astype(str)
         df['source.height_above_vent'] = df['source.height_above_vent'].astype(str)
 
+        # ... and we set the mass flow rate to 1000.0 to avoid floating point errors
+        # for small numbers  - we scale back to the equivalent for a mass flow rate of 1 kg s-1 afterwards
+        df['source.mass_flow_rate'] = self.mass_flow_rate
+
         
         self.df = df
 
@@ -102,8 +114,6 @@ class Emulator:
     
     def build_surface_emulator(self):
         
-    
-        
         # we construct the emulator datarray in blocks of source_start
         # and concatenate them in the last step - this is the list to 
         # hold them as we build them
@@ -125,12 +135,28 @@ class Emulator:
             
                 da = da.expand_dims(
                     dim={
-                        'height_above_vent':np.array([r['source.height_above_vent']]).astype(float)
+                        'height_above_vent':np.array([r['source.height_above_vent']]).astype(float),
+                        'vertical_turbulence_model':np.array([r['model_physics.vertical_turbulence_model']]).astype(float)
                     })
-            
+
+                # round time to nearest hour
+                da['time'] = (
+                    (
+                        # first we add half the value we want to round to ...
+                        da['time'].values + np.timedelta64(30, 'm')
+                    )
+                    # ... so that when we truncate to that value we effectively round the original number
+                    # up or down appropriately ...
+                    .astype('datetime64[h]')
+
+                    # .. we then turn back to ns format to avoidn triggering lots of xarray warningsd
+                    .astype('datetime64[ns]')
+                
+                )
+                        
                 das.append(da)
-        
-            ds = xr.concat(das,dim='height_above_vent')
+
+            ds = xr.combine_by_coords(das)#, coords = ['height_above_vent', 'vertical_turbulence_model'])
         
             #source_start_date = pd.to_datetime(ds_puff["date"].values[0]) + datetime.timedelta(hours = int(source_start))
             source_start_date = self.start + datetime.timedelta(hours = int(source_start))
@@ -147,35 +173,39 @@ class Emulator:
 
         ds = ds.sortby('source_start')
        
-        self.da_emulator = ds
+        self.da_emulator = ds / float(self.mass_flow_rate)
 
 
-
+    
     def build_station_emulator(self):
-
+    
         # first we need a search string to get a list of all of output station files for each run ...
         search_string = "/".join([self.base_dir, self.name, "*", "*.SO2.res"])
-
+    
         # ... search using that string to get the list of files ...
         files = glob.glob(search_string)
-
+    
         # ... we regex each file to get an array of the whole path, the index number, and the station id,
         # then put them all into a dataframe ...
         df_results = pd.DataFrame([    
             re.findall(r"(.*/(\d+)\.(.*)\.SO2\.res)",file)[0] for file in files
             ],columns=['file','index','local_id'])
-
+    
         # ... convert the index to an int so we can join with it later ...
         df_results['index'] = df_results['index'].astype(int)
-
+    
         # ... and we sort  by the index as the files from glob are in a rabndom order.
         df_results = df_results.sort_values("index")
-
+    
         # Now, we join the list of file names with the dataframe of run information, specifically
         # the source start and the height above vent, so we can relate each file of concentrations
         # at a given station with the ESPs used to produce it
-        df_all = self.df[['source.height_above_vent','source.source_start'	]].join(df_results.set_index('index'))
-
+        df_all = self.df[[
+            'source.height_above_vent',
+            'source.source_start', 
+            'model_physics.vertical_turbulence_model'	
+        ]].join(df_results.set_index('index'))
+    
         # next we need to load the SO2 concentration time series associated with each file.
         # that's quite a complicated step, so we define a dedicated function for it ...
         def get_file(file):
@@ -192,6 +222,21 @@ class Emulator:
             
             # ... formats the time appropriately ...
             df['date'] = df['date'].apply(lambda r: datetime.datetime.strptime(r,"%d%b%Y_%H:%M"))
+    
+            # round time to nearest hour
+            df['date'] = (
+                        (
+                            # first we add half the value we want to round to ...
+                            df['date'].values + np.timedelta64(30, 'm')
+                        )
+                        # ... so that when we truncate to that value we effectively round the original number
+                        # up or down appropriately ...
+                        .astype('datetime64[h]')
+    
+                        # .. we then turn back to ns format to avoidn triggering lots of xarray warningsd
+                        .astype('datetime64[ns]')
+                    
+                    )
             
             # ... and sets the appropriate data type ...
             for name in ['load ground','conc. ground','conc pm5 ground','conc pm10 ground','conc pm20 ground']:
@@ -200,42 +245,48 @@ class Emulator:
             
             # ... before returning the data within that file as a dataframe:
             return(df)
-
+    
         # .... we then store all the data in a list ...
         dfs = []
-
+    
         # ... by iterating over every row in the joined dataframe containing the ESPs and the filenames ...
         for i, r in df_all.iterrows():
-
+    
             # ... loading the data in the file using the function we just defined ...
             df_file  = get_file(r['file'])
-
+    
             # ... and adding the ESPs and the station id as a separate column ....
             df_file['source.height_above_vent'] = r['source.height_above_vent']
             df_file['source.source_start'] = r['source.source_start']
+            df_file[ 'model_physics.vertical_turbulence_model'] = r[ 'model_physics.vertical_turbulence_model']
             df_file['local_id'] = r['local_id']
             dfs.append(df_file)
-
+    
         # ... so that when we concat all the station concentration data into one giant dataframe.
         dfs = pd.concat(dfs).reset_index(drop=True)
-
+    
         # We fix the ESP data types ...
         dfs['source.source_start'] = dfs['source.source_start'].astype(int)
-
+    
         dfs['source.height_above_vent'] = dfs['source.height_above_vent'].astype(float)
-
+    
         # ... and convert the dataframe to a dataset, setting the ESPs and the station id to be the index ...
-        da_puff = dfs.set_index(['source.source_start','local_id','date','source.height_above_vent'])['conc. ground'].to_xarray()
-
+        da_puff = dfs.set_index([
+            'source.source_start',
+            'local_id',
+            'date',
+            'source.height_above_vent',
+            'model_physics.vertical_turbulence_model'
+        ])['conc. ground'].to_xarray()
+    
         # ... we need to remember to sort by the ESPs so that when we export the array to Stan it is ordered as we expect it ... 
         da_puff = da_puff.sortby('source.source_start').sortby('source.height_above_vent')
-
-        da_puff = da_puff.sortby("date")
-
-        self.da_puff = da_puff
-
-
     
+        da_puff = da_puff.sortby("date")
+    
+        self.da_puff = da_puff / float(self.mass_flow_rate)
+    
+        
     def build_col_mass_emulator(self):
         
     
@@ -261,13 +312,30 @@ class Emulator:
             
                 da = da.expand_dims(
                     dim={
-                        'height_above_vent':np.array([r['source.height_above_vent']]).astype(float)
-                    })
+                            'height_above_vent':np.array([r['source.height_above_vent']]).astype(float),
+                            'vertical_turbulence_model':np.array([r['model_physics.vertical_turbulence_model']]).astype(float)
+                        })
+                # round time to nearest hour
+                da['time'] = (
+                        (
+                            # first we add half the value we want to round to ...
+                            da['time'].values + np.timedelta64(30, 'm')
+                        )
+                        # ... so that when we truncate to that value we effectively round the original number
+                        # up or down appropriately ...
+                        .astype('datetime64[h]')
+    
+                        # .. we then turn back to ns format to avoidn triggering lots of xarray warningsd
+                        .astype('datetime64[ns]')
+                    
+                    )
+    
             
                 das.append(da)
         
-            ds = xr.concat(das,dim='height_above_vent')
-        
+            #ds = xr.concat(das,dim='height_above_vent')
+            ds = xr.combine_by_coords(das)
+            
             #source_start_date = pd.to_datetime(ds_puff["date"].values[0]) + datetime.timedelta(hours = int(source_start))
             source_start_date = self.start + datetime.timedelta(hours = int(source_start))
     
@@ -283,14 +351,18 @@ class Emulator:
     
         ds = ds.sortby('source_start')
     
-        self.da_col_mass_emulator = ds
+        # finally we scale the concentrations back down to 1
+        self.da_col_mass_emulator = ds / float(self.mass_flow_rate)
                 
-        
         
     def estimate(self, esps:pd.DataFrame):
     
         # get zero datarray with the correct dims and coords
-        total = self.da_emulator.isel(source_start=0, height_above_vent=0).copy()*0.0
+        total = self.da_emulator.isel(
+            source_start=0, 
+            height_above_vent=0,
+            vertical_turbulence_model=0
+        ).copy()*0.0
     
         for i, r in esps.iterrows():
     
@@ -299,14 +371,20 @@ class Emulator:
             h = r['height_above_vent']
     
             f = r['flux']
+
+            v = r['vertical_turbulence_model']
+
     
             increment = (
                                 self.da_emulator
                                 .sel({'source_start':s})
                                 .interp(
-                                    {'height_above_vent':h},
+                                    {
+                                        'height_above_vent':h,
+                                        'vertical_turbulence_model':v
+
+                                    },
                                     method='linear'
-                                    #method='cubic'
                                 ) * f 
                         )
     
@@ -317,7 +395,11 @@ class Emulator:
     def estimate_stations(self, esps:pd.DataFrame):
     
         # get zero datarray with the correct dims and coords
-        total = self.da_puff.isel({"source.source_start":0, "source.height_above_vent":0}).copy()*0.0
+        total = self.da_puff.isel({
+                        "source.source_start":0, 
+                        "source.height_above_vent":0, 
+                        'model_physics.vertical_turbulence_model':0
+                    }).copy()*0.0
     
         for i, r in esps.iterrows():
     
@@ -326,16 +408,20 @@ class Emulator:
             h = r['height_above_vent']
     
             f = r['flux']
+
+            v = r['vertical_turbulence_model']
     
             increment = (
-                            self
-                                .da_puff
-                                .sel({'source.source_start':s})
-                                .interp(
-                                        {'source.height_above_vent':h},
-                                        method='linear'
-                                        #method='cubic'
-                                        ) * f 
+                self
+                    .da_puff
+                    .sel({'source.source_start':s})
+                    .interp(
+                            {
+                                'source.height_above_vent':h,
+                                'model_physics.vertical_turbulence_model':v
+                            },
+                            method='linear'
+                            ) * f 
                         )
     
             total = total + increment
@@ -343,7 +429,8 @@ class Emulator:
         return total
         
 
-    def get_random_test_esp(self, height_low, height_high, flux_low, flux_high):
+    def get_random_test_esp(self, height_low, height_high, flux_low, flux_high, 
+                            vertical_turbulence_model_low, vertical_turbulence_model_high):
         # ... and for each test we will create a random time series of
         # plume heights and fluxes. We start by gettingt the source
         # starting times covered by the emulator as a dataframe ...
@@ -364,6 +451,12 @@ class Emulator:
                     high=flux_high,
                     size=num_source_start
                 )
+
+        df_esp['vertical_turbulence_model'] = np.random.uniform(
+                    low=vertical_turbulence_model_low,
+                    high=vertical_turbulence_model_high,
+                    size=num_source_start
+                )
         
         df_esp = df_esp.reset_index(drop=True)
 
@@ -376,7 +469,10 @@ class Emulator:
 
         return(df_esp)
     
-    def get_random_test_esps(self, num_tests, height_low, height_high, flux_low, flux_high):
+    def get_random_test_esps(self, num_tests, 
+                             height_low, height_high, 
+                             flux_low, flux_high,
+                             vertical_turbulence_model_low, vertical_turbulence_model_high):
          # create an empty list to hold the dataframes
         # we will create (one for each run)
         all_esps = []
@@ -384,7 +480,11 @@ class Emulator:
         # now we iterate over each test ...
         for n in range(num_tests):
 
-            df_esp = self.get_random_test_esp(height_low, height_high, flux_low, flux_high)
+            df_esp = self.get_random_test_esp(
+                height_low, height_high, 
+                flux_low, flux_high, 
+                vertical_turbulence_model_low, vertical_turbulence_model_high
+            )
 
             # ... we also need to remember the run number ...
             df_esp['run'] = n
@@ -528,7 +628,11 @@ class Emulator:
 
         da = xr.concat(das, dim='num')
 
-        da.name = 'emulated surface SO2'
+        #print(da)
+
+        da['emulated surface SO2']  =  da['SO2_con_surface'] 
+
+        del(da['SO2_con_surface'] )
 
         return da   
 
@@ -541,6 +645,8 @@ class Emulator:
                     height_high=None,
                     flux_low=45.0, 
                     flux_high=85.0,
+                    vertical_turbulence_model_low=0.0, 
+                    vertical_turbulence_model_high=0.0
 
                     
                     ):
@@ -557,13 +663,32 @@ class Emulator:
             height_high = max(self.heights)
 
         # get random ESPs ...
-        self.df_esps = self.get_random_test_esps(num_tests, height_low, height_high, flux_low, flux_high)
+        self.df_esps = self.get_random_test_esps(num_tests, 
+                                                 height_low, height_high, 
+                                                 flux_low, flux_high,
+                                                vertical_turbulence_model_low, vertical_turbulence_model_high
+                                                )
 
         # ... convert those random ESPs to a dataframe fo runs for Fall3D Batch ...
         self.df_runs = self.convert_esps_to_runs(self.df_esps)
 
         # ... run the tests and load the results ...
         ds_tests_fall3d = self.run_tests(self.df_runs, num_tests)
+
+        # round time to nearest hour
+        ds_tests_fall3d['time'] = (
+                (
+                    # first we add half the value we want to round to ...
+                    ds_tests_fall3d['time'].values + np.timedelta64(30, 'm')
+                )
+                # ... so that when we truncate to that value we effectively round the original number
+                # up or down appropriately ...
+                .astype('datetime64[h]')
+
+                # .. we then turn back to ns format to avoidn triggering lots of xarray warningsd
+                .astype('datetime64[ns]')
+            
+            )
 
         # ... get the emulated output for the random ESPs ...
         ds_tests_emulated = self.emulate_tests(self.df_esps, num_tests)
@@ -574,7 +699,8 @@ class Emulator:
                                 ])
 
     def plot_emulator_diagnostics(self):
-                
+
+        print("comparison limited to first 24 hours")
         xx = self.ds_tests['fall3d surface SO2'].isel(time=slice(0,24)).values.flatten()
         yy = self.ds_tests['emulated surface SO2'].isel(time=slice(0,24)).values.flatten()
 
@@ -637,7 +763,7 @@ class Emulator:
 
         axs[0].plot(
             [min(xx),max(xx)],
-            [min(yy), max(yy)],
+            [min(xx), max(xx)],
             color='r'
         )
     
